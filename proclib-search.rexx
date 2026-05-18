@@ -1,5 +1,10 @@
-/* REXX */
-/* Detect proclib search order and locate procedure */
-PARSE UPPER ARG procname
-ADDRESS TSO
-/* ... full script ... */
+/*
+This file has been moved.
+
+The current version is located at:
+  rexx/detect_proclib_order.rexx
+
+Please use that one instead.
+
+(Old root file removed for clean structure)
+*/
