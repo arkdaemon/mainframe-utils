@@ -1,8 +1,8 @@
-/* REXX - Parse SMF 119 subtype 6 records and output CSV with
+/* REXX - Parse SMF 119 subtype 6 records and output CSV with     */
 /* interface bytes in/out and rates per sec/min/hour/day          */
 
-/* Parameters:
-/* - target_sid: Optional LPAR name to filter records (e.g., SYS1)
+/* Parameters:                                                    */
+/* - target_sid: Optional LPAR name to filter records (e.g., SYS1)*/
 /*   If not provided, process all LPARs.                          */
 
 ARG target_sid .
@@ -11,6 +11,7 @@ ARG target_sid .
 NUMERIC DIGITS 20
 
 /* Function to get unsigned 64-bit value from 8 bytes             */
+/* This handles negative values by adding 2^64 if needed          */
 get_unsigned8: PROCEDURE
   ARG bytes
   val = C2D(bytes)
@@ -52,22 +53,24 @@ DO FOREVER
   /* Filter by target_sid if provided                             */
   IF target_sid \= '' & sid \= target_sid THEN ITERATE
   
-  /* Extract packed date and time                                 */
-  dte = SUBSTR(rec,11,4)
-  tme = C2D(SUBSTR(rec,7,4))
+  /* Extract packed date (0cyydddF) and time                      */
+  dte = SUBSTR(rec,11,4)  /* offset 10                        */
+  tme = C2D(SUBSTR(rec,7,4))  /* offset 6                     */
   
   /* Parse date from packed format                                */
   hex_dte = C2X(dte)
-  c = X2D(SUBSTR(hex_dte,2,1))
-  yy = X2D(SUBSTR(hex_dte,3,2))
-  ddd = X2D(SUBSTR(hex_dte,5,3))
+  c = X2D(SUBSTR(hex_dte,2,1))  /* Century                      */
+  yy = X2D(SUBSTR(hex_dte,3,2)) /* Year                         */
+  ddd = X2D(SUBSTR(hex_dte,5,3)) /* Day of year                 */
   year = 1900 + c * 100 + yy
   
+  /* Determine if leap year for accurate month/day calculation    */
   leap = 0
   IF year // 4 = 0 & (year // 100 \= 0 | year // 400 = 0),
      THEN leap = 1
   month_days = '31 '||(28 + leap)||' 31 30 31 30 31 31 30 31 30 31'
   
+  /* Calculate month and day from day of year                     */
   day_of_year = ddd
   DO m = 1 TO 12
     md = WORD(month_days, m)
@@ -79,54 +82,77 @@ DO FOREVER
     day_of_year = day_of_year - md
   END
   
-  date_str = RIGHT(year,4,'0')||'-'||RIGHT(month,2,'0')||'-'||RIGHT(day,2,'0')
+  /* Format date as YYYY-MM-DD                                    */
+  date_str = RIGHT(year,4,'0')||'-'||RIGHT(month,2,'0')||'-'||,
+             RIGHT(day,2,'0')
   
   /* Parse time into HH:MM:SS                                     */
   seconds = tme / 100
   hours = TRUNC(seconds / 3600)
   mins = TRUNC((seconds // 3600) / 60)
   secs = TRUNC(seconds // 60)
-  time_str = RIGHT(hours,2,'0')||':'||RIGHT(mins,2,'0')||':'||RIGHT(secs,2,'0')
+  time_str = RIGHT(hours,2,'0')||':'||RIGHT(mins,2,'0')||':'||,
+             RIGHT(secs,2,'0')
   
-  /* Parse self-defining section                                  */
-  s1_off = C2D(SUBSTR(rec,37,4))
+  /* Parse self-defining section for interface data               */
+  s1_off = C2D(SUBSTR(rec,37,4))  /* offset 36                */
   s1_len = C2D(SUBSTR(rec,41,2))
   s1_num = C2D(SUBSTR(rec,43,2))
   
+  /* Process each interface in the record                         */
   curr_pos = s1_off + 1
   DO int = 1 TO s1_num
+    /* Extract duration in microseconds                           */
     duration_us = get_unsigned8(SUBSTR(rec, curr_pos, 8))
+    
+    /* Extract interface name                                     */
     if_name = STRIP(SUBSTR(rec, curr_pos + 25, 16))
+    
+    /* Extract inbound and outbound bytes                         */
     in_bytes = get_unsigned8(SUBSTR(rec, curr_pos + 89, 8))
     out_bytes = get_unsigned8(SUBSTR(rec, curr_pos + 133, 8))
     
+    /* Calculate duration in seconds                              */
     duration_sec = duration_us / 1000000
-    IF duration_sec = 0 THEN duration_sec = 1
+    IF duration_sec = 0 THEN duration_sec = 1  /* Avoid div by 0 */
     
+    /* Calculate rates per second                                 */
     in_per_sec = in_bytes / duration_sec
     out_per_sec = out_bytes / duration_sec
     
+    /* Calculate rates per minute                                 */
     in_per_min = in_per_sec * 60
     out_per_min = out_per_sec * 60
+    
+    /* Calculate rates per hour                                   */
     in_per_hour = in_per_min * 60
     out_per_hour = out_per_min * 60
+    
+    /* Calculate rates per day                                    */
     in_per_day = in_per_hour * 24
     out_per_day = out_per_hour * 24
     
+    /* Queue CSV line for this interface                          */
     QUEUE '"'sid'","'date_str'","'time_str'","'if_name'","',
           duration_sec'","'in_bytes'","'out_bytes'","',
           in_per_sec'","'out_per_sec'","'in_per_min'","',
           out_per_min'","'in_per_hour'","'out_per_hour'","',
           in_per_day'","'out_per_day'"'
     
+    /* Move to next interface position                            */
     curr_pos = curr_pos + s1_len
   END
   
+  /* Write queued CSV lines to output                           */
   "EXECIO "QUEUED()" DISKW OUTDD ("
 END
 
-/* Close datasets                                                 */
+/* Close input and output datasets                                */
 "EXECIO 0 DISKR SMFIN (FINIS"
 "EXECIO 0 DISKW OUTDD (FINIS"
 
+/* Exit the script                                                */
 EXIT 0
+
+/* To invoke via JCL:                                             */
+/* Save the REXX in a PDS, e.g., MYLIB.REXX(SMFPARSE).            */
